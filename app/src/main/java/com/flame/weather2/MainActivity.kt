@@ -206,7 +206,7 @@ fun SettingsPage(lang: AppLanguage, onLangChange: (AppLanguage) -> Unit, onBack:
         HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
         Card(modifier = Modifier.fillMaxWidth().clickable { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Flame-Software-Project/Flame-Weather"))) }) {
             Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Rounded., null)
+                Icon(Icons.Rounded.Info, null)
                 Spacer(modifier = Modifier.width(16.dp))
                 Text("GitHub: Flame Weather")
             }
