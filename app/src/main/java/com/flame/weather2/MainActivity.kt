@@ -6,6 +6,8 @@ import android.provider.Settings
 import android.os.Bundle
 import android.location.Geocoder
 import android.Manifest
+import android.appwidget.AppWidgetManager
+import android.content.ComponentName
 import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -117,7 +119,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun startSmartLocation() {
         lifecycleScope.launch {
-            // Check location permission before accessing GPS
             val hasPerm = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
             if (hasPerm) {
@@ -135,7 +136,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Fallback to IP if GPS is unavailable or permission is denied
             statusMessage = "Using IP Location..."
             val ipLoc = withContext(Dispatchers.IO) { ipLocationHelper.getIpLocation() }
             if (ipLoc != null) updateWeatherUI(ipLoc.first, ipLoc.second)
@@ -156,16 +156,35 @@ class MainActivity : AppCompatActivity() {
                     if (city.isNotEmpty()) "$city, $district" else "Unknown"
                 } catch (e: Exception) { "Unknown" }
             }
+
             val result = weatherRepository.fetchFullWeather(lat, lon)
+
             if (result != null) {
                 weatherData = result.copy(locationName = resolvedName)
                 statusMessage = "Updated"
-            } else { statusMessage = "Sync Error" }
+
+                val prefs = getSharedPreferences("weather_prefs", MODE_PRIVATE)
+                prefs.edit()
+                    .putString("last_temp", result.currentTemp)
+                    .putString("last_loc", resolvedName)
+                    .putString("last_symbol", result.symbolCode)
+                    .apply()
+
+                val mgr = AppWidgetManager.getInstance(this@MainActivity)
+                val component = ComponentName(this@MainActivity, WeatherWidget::class.java)
+                val ids = mgr.getAppWidgetIds(component)
+
+                for (id in ids) {
+                    WeatherWidget.updateAppWidget(this@MainActivity, mgr, id)
+                }
+
+            } else {
+                statusMessage = "Sync Error"
+            }
         }
     }
 
     private fun setupBackgroundWork(lat: Double, lon: Double) {
-        // Schedule periodic background refresh
         val data = Data.Builder().putDouble("lat", lat).putDouble("lon", lon).build()
         val request = PeriodicWorkRequestBuilder<WeatherWorker>(20, TimeUnit.MINUTES)
             .setInputData(data)
@@ -181,7 +200,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showPermissionDialog() {
-        MaterialAlertDialogBuilder(this).setTitle("Location Access").setMessage("Please enable GPS for accurate results.").setPositiveButton("Settings") { _, _ -> startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))) }.setNegativeButton("Ignore", null).show()
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Location Access")
+            .setMessage("Please enable GPS for accurate results.")
+            .setPositiveButton("Settings") { _, _ ->
+                startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)))
+            }
+            .setNegativeButton("Ignore", null)
+            .show()
     }
 }
 
@@ -224,7 +250,6 @@ fun WeatherDashboard(author: String, status: String, data: WeatherInfo?, lang: A
         }
         if (data != null) {
             item {
-                // Main weather display
                 Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
                     Column(modifier = Modifier.padding(20.dp)) {
                         Text(data.locationName, style = MaterialTheme.typography.titleMedium)
@@ -243,7 +268,6 @@ fun WeatherDashboard(author: String, status: String, data: WeatherInfo?, lang: A
                 Text(if (lang == AppLanguage.ZH) "未来预报" else "Daily Forecast", style = MaterialTheme.typography.titleLarge)
                 Spacer(modifier = Modifier.height(12.dp))
             }
-            // Forecast list with icons
             items(data.forecast) { day ->
                 Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                     Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -264,7 +288,6 @@ fun WeatherDashboard(author: String, status: String, data: WeatherInfo?, lang: A
     }
 }
 
-// Utility to map MET symbol codes to Material Icons
 fun mapWeatherCodeToIcon(code: String?): ImageVector {
     val s = code?.lowercase() ?: ""
     return when {
@@ -277,7 +300,6 @@ fun mapWeatherCodeToIcon(code: String?): ImageVector {
     }
 }
 
-// Translate API weather codes to readable strings
 fun translateSymbol(code: String?, lang: AppLanguage): String {
     val s = code?.lowercase() ?: return "Unknown"
     val isZh = lang == AppLanguage.ZH
