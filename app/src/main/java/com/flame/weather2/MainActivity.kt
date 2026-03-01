@@ -264,7 +264,7 @@ fun SettingsDialog(
 
                 TextButton(
                     onClick = {
-                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Flame-Software-Project/Flame-Wea  ther"))
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Flame-Software-Project/Flame-Weather"))
                         context.startActivity(intent)
                     },
                     modifier = Modifier.padding(0.dp)
