@@ -1,19 +1,13 @@
 package com.flame.weather2
 
-import android.net.Uri
-import android.content.Intent
-import android.provider.Settings
-import android.os.Bundle
-import android.location.Geocoder
 import android.Manifest
-import android.appwidget.AppWidgetManager
-import android.content.ComponentName
+import android.content.Intent
 import android.content.pm.PackageManager
-import androidx.activity.compose.BackHandler
+import android.net.Uri
+import android.os.Bundle
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
-import androidx.compose.animation.*
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -31,258 +25,372 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import androidx.work.*
 import com.flame.weather2.ui.theme.WeatherTheme
-import com.google.android.material.color.DynamicColors
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.*
-import java.util.Locale
-import java.util.concurrent.TimeUnit
+import java.util.*
 
-data class DailyForecast(val date: String, val temp: String, val symbolCode: String?)
+
+enum class AppLanguage { EN, ZH }
+
 data class WeatherInfo(
     val locationName: String,
     val currentTemp: String,
     val wind: String,
-    val precipitation: String,
+    val rain: String,
     val aqi: String,
     val forecast: List<DailyForecast>,
-    val symbolCode: String?
+    val currentSymbol: String?
 )
-enum class AppLanguage { EN, ZH }
+
+data class DailyForecast(
+    val date: String,
+    val temp: String,
+    val symbol: String?
+)
+
+data class LocationSuggestion(
+    val name: String,
+    val detail: String,
+    val lat: Double,
+    val lon: Double
+)
 
 class MainActivity : AppCompatActivity() {
-    private lateinit var locationHelper: LocationHelper
-    private val weatherRepository = WeatherRepository()
-    private val ipLocationHelper by lazy { IPLocationHelper(this) }
-
-    private var statusMessage by mutableStateOf("Initializing...")
     private var weatherData by mutableStateOf<WeatherInfo?>(null)
-    private var isSettingPage by mutableStateOf(false)
+    private var statusMessage by mutableStateOf("Initializing...")
     private var currentLang by mutableStateOf(AppLanguage.ZH)
-    private var lastLocation by mutableStateOf<Pair<Double, Double>?>(null)
+    private var isManualLocation by mutableStateOf(false)
+
+    // 搜索建议与防抖
+    private var suggestions by mutableStateOf<List<LocationSuggestion>>(emptyList())
+    private var searchJob: Job? = null
+
+
+    private var showSettingsDialog by mutableStateOf(false)
+
+    private lateinit var locationHelper: LocationHelper
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        DynamicColors.applyToActivityIfAvailable(this)
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
 
         locationHelper = LocationHelper(this) { lat, lon ->
-            lastLocation = Pair(lat, lon)
-            updateWeatherUI(lat, lon)
-            setupBackgroundWork(lat, lon)
-            locationHelper.stopLocationUpdates()
+            if (!isManualLocation) {
+                updateWeatherUI(lat, lon)
+            }
         }
 
         setContent {
             WeatherTheme {
-                LaunchedEffect(Unit) {
-                    while (true) {
-                        startSmartLocation()
-                        delay(20 * 60 * 1000L)
-                    }
-                }
-
-                Surface(color = MaterialTheme.colorScheme.background) {
-                    AnimatedContent(targetState = isSettingPage, label = "Nav") { settingActive ->
-                        if (settingActive) {
-                            SettingsPage(
-                                lang = currentLang,
-                                onLangChange = { newLang ->
-                                    currentLang = newLang
-                                    lastLocation?.let { updateWeatherUI(it.first, it.second) }
-                                },
-                                onBack = { isSettingPage = false }
-                            )
-                        } else {
-                            MainScreen()
-                        }
-                    }
+                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    MainScreen()
                 }
             }
         }
-        checkAndHandlePermission()
+
+        checkPermissionsAndStart()
     }
 
     @Composable
     fun MainScreen() {
         Box(modifier = Modifier.fillMaxSize()) {
-            WeatherDashboard("Bruce-Liu-28", statusMessage, weatherData, currentLang, Modifier.padding(top = 32.dp))
-            IconButton(
-                onClick = { isSettingPage = true },
-                modifier = Modifier.align(Alignment.TopEnd).padding(top = 40.dp, end = 16.dp)
+            WeatherDashboard(
+                status = statusMessage,
+                data = weatherData,
+                lang = currentLang,
+                suggestions = suggestions,
+                onQueryChange = { query -> debounceSearch(query) },
+                onLocationSelected = { suggestion ->
+                    suggestions = emptyList()
+                    isManualLocation = true
+                    statusMessage = if (currentLang == AppLanguage.ZH) "定位: ${suggestion.name}" else "Location: ${suggestion.name}"
+                    updateWeatherUI(suggestion.lat, suggestion.lon)
+                },
+                onResetLocation = {
+                    isManualLocation = false
+                    statusMessage = if (currentLang == AppLanguage.ZH) "切换至自动定位..." else "Switching to Auto..."
+                    startSmartLocation()
+                }
+            )
+
+
+            SmallFloatingActionButton(
+                onClick = { showSettingsDialog = true },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(24.dp)
             ) {
-                Icon(Icons.Rounded.Settings, "Settings", modifier = Modifier.size(32.dp))
+                Icon(Icons.Rounded.Settings, contentDescription = "Settings")
+            }
+
+
+            if (showSettingsDialog) {
+                SettingsDialog(
+                    currentLang = currentLang,
+                    onLanguageChange = { currentLang = it },
+                    onDismiss = { showSettingsDialog = false }
+                )
             }
         }
     }
 
-    private fun startSmartLocation() {
-        lifecycleScope.launch {
-            val hasPerm = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
-            if (hasPerm) {
-                statusMessage = "Locating..."
-                locationHelper.startLocationUpdates()
-                val gps = withTimeoutOrNull(8000) {
-                    while (locationHelper.latestLocation == null) delay(500)
-                    locationHelper.latestLocation
-                }
-                locationHelper.stopLocationUpdates()
+    private fun debounceSearch(query: String) {
+        searchJob?.cancel()
+        if (query.isBlank()) {
+            suggestions = emptyList()
+            return
+        }
 
-                if (gps != null) {
-                    updateWeatherUI(gps.first, gps.second)
-                    return@launch
+        searchJob = lifecycleScope.launch {
+            delay(500)
+            fetchSuggestions(query)
+        }
+    }
+
+    private suspend fun fetchSuggestions(query: String) {
+        withContext(Dispatchers.IO) {
+            try {
+                val langParam = if (currentLang == AppLanguage.ZH) "zh" else "en"
+                val url = "https://geocoding-api.open-meteo.com/v1/search?name=${query}&count=5&language=$langParam"
+
+                val client = okhttp3.OkHttpClient()
+                val request = okhttp3.Request.Builder().url(url).build()
+
+                client.newCall(request).execute().use { response ->
+                    val body = response.body?.string() ?: ""
+                    val json = org.json.JSONObject(body)
+
+                    val newList = mutableListOf<LocationSuggestion>()
+                    if (json.has("results")) {
+                        val results = json.getJSONArray("results")
+                        for (i in 0 until results.length()) {
+                            val item = results.getJSONObject(i)
+                            newList.add(LocationSuggestion(
+                                name = item.getString("name"),
+                                detail = "${item.optString("admin1", "")}, ${item.optString("country", "")}",
+                                lat = item.getDouble("latitude"),
+                                lon = item.getDouble("longitude")
+                            ))
+                        }
+                    }
+
+                    withContext(Dispatchers.Main) {
+                        suggestions = newList
+                    }
                 }
+            } catch (e: Exception) {
+
             }
-
-            statusMessage = "Using IP Location..."
-            val ipLoc = withContext(Dispatchers.IO) { ipLocationHelper.getIpLocation() }
-            if (ipLoc != null) updateWeatherUI(ipLoc.first, ipLoc.second)
-            else statusMessage = "Location Failed"
         }
     }
 
     private fun updateWeatherUI(lat: Double, lon: Double) {
         lifecycleScope.launch {
-            statusMessage = "Syncing..."
-            val resolvedName = withContext(Dispatchers.IO) {
-                try {
-                    val locale = if (currentLang == AppLanguage.ZH) Locale.CHINA else Locale.US
-                    val geocoder = Geocoder(this@MainActivity, locale)
-                    val addr = geocoder.getFromLocation(lat, lon, 1)?.get(0)
-                    val city = addr?.locality ?: addr?.adminArea ?: ""
-                    val district = addr?.subLocality ?: ""
-                    if (city.isNotEmpty()) "$city, $district" else "Unknown"
-                } catch (e: Exception) { "Unknown" }
-            }
-
-            val result = weatherRepository.fetchFullWeather(lat, lon)
-
-            if (result != null) {
-                weatherData = result.copy(locationName = resolvedName)
-                statusMessage = "Updated"
-
-                val prefs = getSharedPreferences("weather_prefs", MODE_PRIVATE)
-                prefs.edit()
-                    .putString("last_temp", result.currentTemp)
-                    .putString("last_loc", resolvedName)
-                    .putString("last_symbol", result.symbolCode)
-                    .apply()
-
-                val mgr = AppWidgetManager.getInstance(this@MainActivity)
-                val component = ComponentName(this@MainActivity, WeatherWidget::class.java)
-                val ids = mgr.getAppWidgetIds(component)
-
-                for (id in ids) {
-                    WeatherWidget.updateAppWidget(this@MainActivity, mgr, id)
-                }
-
+            val repo = WeatherRepository()
+            val data = repo.fetchFullWeather(lat, lon)
+            if (data != null) {
+                weatherData = data
+                if (!isManualLocation) statusMessage = if (currentLang == AppLanguage.ZH) "定位成功" else "Updated via GPS/IP"
             } else {
-                statusMessage = "Sync Error"
+                statusMessage = if (currentLang == AppLanguage.ZH) "获取天气失败" else "Fetch failed"
             }
         }
     }
 
-    private fun setupBackgroundWork(lat: Double, lon: Double) {
-        val data = Data.Builder().putDouble("lat", lat).putDouble("lon", lon).build()
-        val request = PeriodicWorkRequestBuilder<WeatherWorker>(20, TimeUnit.MINUTES)
-            .setInputData(data)
-            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-            .build()
-        WorkManager.getInstance(this).enqueueUniquePeriodicWork("WeatherRefresh", ExistingPeriodicWorkPolicy.UPDATE, request)
-    }
-
-    private fun checkAndHandlePermission() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            showPermissionDialog()
+    private fun checkPermissionsAndStart() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+            == PackageManager.PERMISSION_GRANTED) {
+            startSmartLocation()
+        } else {
+            statusMessage = if (currentLang == AppLanguage.ZH) "等待权限..." else "Waiting for permission..."
         }
     }
 
-    private fun showPermissionDialog() {
-        MaterialAlertDialogBuilder(this)
-            .setTitle("Location Access")
-            .setMessage("Please enable GPS for accurate results.")
-            .setPositiveButton("Settings") { _, _ ->
-                startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)))
+    private fun startSmartLocation() {
+        locationHelper.startLocationUpdates()
+        lifecycleScope.launch {
+            val ipLoc = IPLocationHelper(this@MainActivity).getIpLocation()
+            if (ipLoc != null && !isManualLocation && weatherData == null) {
+                updateWeatherUI(ipLoc.first, ipLoc.second)
             }
-            .setNegativeButton("Ignore", null)
-            .show()
+        }
     }
 }
 
-// --- UI COMPONENTS ---
+
+@Composable
+fun SettingsDialog(
+    currentLang: AppLanguage,
+    onLanguageChange: (AppLanguage) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (currentLang == AppLanguage.ZH) "设置" else "Settings") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = if (currentLang == AppLanguage.ZH) "语言 / Language" else "Language",
+                    style = MaterialTheme.typography.labelMedium
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    FilterChip(
+                        selected = currentLang == AppLanguage.ZH,
+                        onClick = { onLanguageChange(AppLanguage.ZH) },
+                        label = { Text("中文") }
+                    )
+                    FilterChip(
+                        selected = currentLang == AppLanguage.EN,
+                        onClick = { onLanguageChange(AppLanguage.EN) },
+                        label = { Text("English") }
+                    )
+                }
+
+                HorizontalDivider()
+
+                Text(
+                    text = if (currentLang == AppLanguage.ZH) "关于" else "About",
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Text(
+                    text = if (currentLang == AppLanguage.ZH)
+                        "Flame Weather v1.1\n基于 Open-Meteo 与 Met.no 数据源"
+                    else "Flame Weather v1.1\nPowered by Open-Meteo & Met.no",
+                    style = MaterialTheme.typography.bodySmall
+                )
+
+                TextButton(
+                    onClick = {
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Flame-Software-Project/Flame-Wea  ther"))
+                        context.startActivity(intent)
+                    },
+                    modifier = Modifier.padding(0.dp)
+                ) {
+                    Icon(Icons.Rounded.Link, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("GitHub Repository", fontSize = 14.sp)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(if (currentLang == AppLanguage.ZH) "确定" else "OK")
+            }
+        }
+    )
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsPage(lang: AppLanguage, onLangChange: (AppLanguage) -> Unit, onBack: () -> Unit) {
-    val context = LocalContext.current
-    BackHandler { onBack() }
-    Column(modifier = Modifier.fillMaxSize().padding(24.dp).padding(top = 32.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.Rounded.ArrowBack, null) }
-            Text(if (lang == AppLanguage.ZH) "设置" else "Settings", style = MaterialTheme.typography.headlineMedium)
-        }
-        Spacer(modifier = Modifier.height(32.dp))
-        Text(if (lang == AppLanguage.ZH) "界面语言" else "Language", style = MaterialTheme.typography.titleLarge)
-        Row(Modifier.fillMaxWidth().padding(vertical = 16.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-            FilterChip(selected = lang == AppLanguage.ZH, onClick = { onLangChange(AppLanguage.ZH) }, label = { Text("简体中文") })
-            FilterChip(selected = lang == AppLanguage.EN, onClick = { onLangChange(AppLanguage.EN) }, label = { Text("English") })
-        }
-        HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
-        Card(modifier = Modifier.fillMaxWidth().clickable { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Flame-Software-Project/Flame-Weather"))) }) {
-            Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Rounded.Info, null)
-                Spacer(modifier = Modifier.width(16.dp))
-                Text("GitHub: Flame Weather")
+fun WeatherDashboard(
+    status: String,
+    data: WeatherInfo?,
+    lang: AppLanguage,
+    suggestions: List<LocationSuggestion>,
+    onQueryChange: (String) -> Unit,
+    onLocationSelected: (LocationSuggestion) -> Unit,
+    onResetLocation: () -> Unit
+) {
+    var searchText by remember { mutableStateOf("") }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp),
+        contentPadding = PaddingValues(top = 48.dp, bottom = 24.dp)
+    ) {
+        item {
+            Text(
+                text = if (lang == AppLanguage.ZH) "天气预报" else "Weather",
+                style = MaterialTheme.typography.headlineLarge,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+
+
+            OutlinedTextField(
+                value = searchText,
+                onValueChange = {
+                    searchText = it
+                    onQueryChange(it)
+                },
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text(if (lang == AppLanguage.ZH) "输入城市名..." else "Search City...") },
+                trailingIcon = {
+                    if (searchText.isNotEmpty()) {
+                        IconButton(onClick = {
+                            searchText = ""
+                            onQueryChange("")
+                        }) {
+                            Icon(Icons.Rounded.Close, null)
+                        }
+                    } else {
+                        Icon(Icons.Rounded.Search, null)
+                    }
+                },
+                singleLine = true
+            )
+
+            AnimatedVisibility(visible = suggestions.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+                ) {
+                    Column {
+                        suggestions.forEach { suggestion ->
+                            ListItem(
+                                headlineContent = { Text(suggestion.name) },
+                                supportingContent = { Text(suggestion.detail, fontSize = 12.sp) },
+                                modifier = Modifier.clickable {
+                                    onLocationSelected(suggestion)
+                                    searchText = ""
+                                }
+                            )
+                            if (suggestion != suggestions.last()) {
+                                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), thickness = 0.5.dp)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(status, style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = onResetLocation) {
+                    Icon(Icons.Rounded.MyLocation, null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (lang == AppLanguage.ZH) "自动定位" else "Auto", fontSize = 12.sp)
+                }
             }
         }
-    }
-}
 
-@Composable
-fun WeatherDashboard(author: String, status: String, data: WeatherInfo?, lang: AppLanguage, modifier: Modifier = Modifier) {
-    LazyColumn(modifier = modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-        item {
-            Text("Flame Weather", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-            Text("Status: $status", style = MaterialTheme.typography.labelSmall)
-            Spacer(modifier = Modifier.height(24.dp))
-        }
         if (data != null) {
             item {
-                Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+                ) {
                     Column(modifier = Modifier.padding(20.dp)) {
-                        Text(data.locationName, style = MaterialTheme.typography.titleMedium)
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(data.currentTemp, style = MaterialTheme.typography.displayLarge, fontWeight = FontWeight.Bold)
-                            Spacer(modifier = Modifier.weight(1f))
-                            Icon(mapWeatherCodeToIcon(data.symbolCode), null, modifier = Modifier.size(64.dp))
-                        }
-                        Text(translateSymbol(data.symbolCode, lang), style = MaterialTheme.typography.headlineSmall)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(data.wind)
-                        Text(data.precipitation)
+                        Icon(mapWeatherCodeToIcon(data.currentSymbol), null, modifier = Modifier.size(48.dp))
+                        Text(data.currentTemp, style = MaterialTheme.typography.displayMedium, fontWeight = FontWeight.Bold)
+                        Text(translateSymbol(data.currentSymbol, lang), style = MaterialTheme.typography.titleLarge)
+                        Text("${data.wind}  |  ${data.rain}")
                     }
                 }
-                Spacer(modifier = Modifier.height(24.dp))
-                Text(if (lang == AppLanguage.ZH) "未来预报" else "Daily Forecast", style = MaterialTheme.typography.titleLarge)
-                Spacer(modifier = Modifier.height(12.dp))
             }
+
             items(data.forecast) { day ->
-                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                    Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(day.date, modifier = Modifier.weight(1f))
-                        Icon(mapWeatherCodeToIcon(day.symbolCode), null, modifier = Modifier.size(24.dp))
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(day.temp, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-        } else {
-            item {
-                Box(modifier = Modifier.fillMaxWidth().padding(top = 100.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
-                }
+                ListItem(
+                    headlineContent = { Text(day.date) },
+                    supportingContent = { Text(translateSymbol(day.symbol, lang)) },
+                    trailingContent = { Text(day.temp, fontWeight = FontWeight.Bold) },
+                    leadingContent = { Icon(mapWeatherCodeToIcon(day.symbol), null) }
+                )
             }
         }
     }
@@ -292,7 +400,7 @@ fun mapWeatherCodeToIcon(code: String?): ImageVector {
     val s = code?.lowercase() ?: ""
     return when {
         s.contains("clearsky") || s.contains("fair") -> Icons.Rounded.WbSunny
-        s.contains("cloudy") -> Icons.Rounded.Cloud
+        s.contains("cloudy") || s.contains("partlycloudy") -> Icons.Rounded.Cloud
         s.contains("rain") -> Icons.Rounded.Umbrella
         s.contains("snow") -> Icons.Rounded.AcUnit
         s.contains("thunder") -> Icons.Rounded.FlashOn
@@ -304,13 +412,12 @@ fun translateSymbol(code: String?, lang: AppLanguage): String {
     val s = code?.lowercase() ?: return "Unknown"
     val isZh = lang == AppLanguage.ZH
     return when {
-        s.contains("clearsky") -> if (isZh) "晴朗" else "Clear Sky"
+        s.contains("clearsky") -> if (isZh) "晴朗" else "Clear"
         s.contains("fair") -> if (isZh) "晴间多云" else "Fair"
-        s.contains("partlycloudy") -> if (isZh) "多云" else "Partly Cloudy"
-        s.contains("cloudy") -> if (isZh) "阴天" else "Overcast"
+        s.contains("cloudy") -> if (isZh) "阴" else "Cloudy"
         s.contains("rain") -> if (isZh) "雨" else "Rain"
         s.contains("snow") -> if (isZh) "雪" else "Snow"
         s.contains("thunder") -> if (isZh) "雷阵雨" else "Thunderstorm"
-        else -> s.replace("_", " ").replaceFirstChar { it.uppercase() }
+        else -> s
     }
 }

@@ -16,7 +16,7 @@ class WeatherRepository {
         val url = "https://api.met.no/weatherapi/locationforecast/2.0/complete?lat=${String.format("%.4f", lat)}&lon=${String.format("%.4f", lon)}"
         val request = Request.Builder()
             .url(url)
-            .addHeader("User-Agent", "FlameWeather/1.0 https://github.com/Flame-Software-Project")
+            .addHeader("User-Agent", "FlameWeather/Open-Source https://github.com/Flame-Software-Project")
             .build()
 
         try {
