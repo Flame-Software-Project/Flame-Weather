@@ -9,6 +9,11 @@
       </config>
     </shared>
     <layouts>
+      <layout url="file://$PROJECT_DIR$/app/src/main/res/drawable/ic_launcher_background.xml">
+        <config>
+          <theme>@style/Theme.Weather</theme>
+        </config>
+      </layout>
       <layout url="file://$PROJECT_DIR$/app/src/main/res/drawable/ic_launcher_foreground.xml">
         <config>
           <theme>@style/Theme.Weather</theme>
@@ -20,6 +25,11 @@
         </config>
       </layout>
       <layout url="file://$PROJECT_DIR$/app/src/main/res/drawable/ic_sunny.xml">
+        <config>
+          <theme>@style/Theme.Weather</theme>
+        </config>
+      </layout>
+      <layout url="file://$PROJECT_DIR$/app/src/main/res/drawable/ic_thunder.xml">
         <config>
           <theme>@style/Theme.Weather</theme>
         </config>
@@ -235,12 +245,12 @@
       <map>
         <entry key="com.flame.weather2">
           <value>
-            <CheckInfo lastCheckTimestamp="1772367092094" />
+            <CheckInfo lastCheckTimestamp="1772788592331" />
           </value>
         </entry>
         <entry key="com.flame.weather2.test">
           <value>
-            <CheckInfo lastCheckTimestamp="1772367092094" />
+            <CheckInfo lastCheckTimestamp="1772788592331" />
           </value>
         </entry>
       </map>
